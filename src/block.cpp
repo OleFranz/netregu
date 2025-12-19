@@ -1,5 +1,7 @@
 #include "block.h"
 
+using namespace std;
+
 
 // MARK: BlockManager
 static bool global_mode = false;
@@ -12,7 +14,7 @@ BlockManager::BlockManager(HANDLE handle)
 
 // MARK: add_block
 void BlockManager::add_block(const BlockConfig& config) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     if (config.executable == "global") {
         global_mode = true;
@@ -60,7 +62,7 @@ void BlockManager::add_block(const BlockConfig& config) {
 
         // apply to all matching PIDs
         for (auto& [pid, config_list] : configs) {
-            std::string exe_name = pid_to_executable(pid);
+            string exe_name = pid_to_executable(pid);
             if (exe_name == config.executable) {
                 // add/update config for this PID
                 bool pid_found = false;
@@ -82,13 +84,13 @@ void BlockManager::add_block(const BlockConfig& config) {
 
 // MARK: remove_block
 void BlockManager::remove_block(DWORD pid) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     configs.erase(pid);
 }
 
-void BlockManager::remove_block(const std::string& executable) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+void BlockManager::remove_block(const string& executable) {
+    lock_guard<mutex> lock(config_mutex);
 
     exe_configs.erase(executable);
 
@@ -99,7 +101,7 @@ void BlockManager::remove_block(const std::string& executable) {
 
         // remove configs that match this executable
         config_list.erase(
-            std::remove_if(config_list.begin(), config_list.end(),
+            remove_if(config_list.begin(), config_list.end(),
                 [&executable](const BlockConfig& cfg) {
                     return cfg.executable == executable;
                 }),
@@ -115,18 +117,18 @@ void BlockManager::remove_block(const std::string& executable) {
     }
 }
 
-void BlockManager::remove_block(DWORD pid, const std::string& executable) {
+void BlockManager::remove_block(DWORD pid, const string& executable) {
     remove_block(pid);
     remove_block(executable);
 }
 
 // MARK: should_block_packet
 bool BlockManager::should_block_packet(DWORD pid, uint32_t packet_size, PacketDirection direction) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     // check for PID specific configs
     auto config_it = configs.find(pid);
-    std::vector<BlockConfig>* active_configs = nullptr;
+    vector<BlockConfig>* active_configs = nullptr;
     bool has_specific_config = false;  // track if we found a specific config
 
     if (config_it != configs.end()) {
@@ -134,9 +136,9 @@ bool BlockManager::should_block_packet(DWORD pid, uint32_t packet_size, PacketDi
         has_specific_config = true;
     } else {
         // check for executable specific configs
-        std::string exe_name = pid_to_executable(pid);
+        string exe_name = pid_to_executable(pid);
         for (const auto& ex : g_config.exclude_targets) {
-            if (ex == std::to_string(pid) || ex == exe_name) {
+            if (ex == to_string(pid) || ex == exe_name) {
                 return false;
             }
         }

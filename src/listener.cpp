@@ -2,6 +2,8 @@
 
 #define MAX_PACKET_SIZE 0xFFFF
 
+using namespace std;
+
 
 struct FlowKey {
     uint32_t src_addr;
@@ -21,7 +23,7 @@ struct FlowKey {
 
 struct FlowInfo {
     DWORD pid;
-    std::chrono::steady_clock::time_point last_seen;
+    chrono::steady_clock::time_point last_seen;
 };
 
 struct FlowKeyHash {
@@ -57,21 +59,21 @@ struct FragmentKeyHash {
 };
 
 
-static std::unordered_map<FlowKey, FlowInfo, FlowKeyHash> flow_to_pid;
-static std::mutex map_mutex;
+static unordered_map<FlowKey, FlowInfo, FlowKeyHash> flow_to_pid;
+static mutex map_mutex;
 
 
 void register_existing_connections() {
     {
         DWORD bufLen = 0;
         if (GetExtendedTcpTable(nullptr, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER)
-            throw std::system_error(GetLastError(), std::system_category(), "GetExtendedTcpTable sizing");
+            throw system_error(GetLastError(), system_category(), "GetExtendedTcpTable sizing");
 
-        std::vector<BYTE> buffer(bufLen);
+        vector<BYTE> buffer(bufLen);
         auto tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
 
         if (auto err = GetExtendedTcpTable(tcpTable, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0); err != NO_ERROR)
-            throw std::system_error(err, std::system_category(), "GetExtendedTcpTable");
+            throw system_error(err, system_category(), "GetExtendedTcpTable");
 
         for (DWORD i = 0; i < tcpTable->dwNumEntries; ++i) {
             const auto& row = tcpTable->table[i];
@@ -93,8 +95,8 @@ void register_existing_connections() {
             flow_key.dst_port = WinDivertHelperNtohs(USHORT(row.dwRemotePort));
             flow_key.proto = IPPROTO_TCP;
             {
-                std::lock_guard<std::mutex> lk(map_mutex);
-                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, std::chrono::steady_clock::now()};
+                lock_guard<mutex> lk(map_mutex);
+                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
             }
         }
     }
@@ -102,13 +104,13 @@ void register_existing_connections() {
     {
         DWORD bufLen = 0;
         if (GetExtendedUdpTable(nullptr, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER)
-            throw std::system_error(GetLastError(), std::system_category(), "GetExtendedUdpTable sizing");
+            throw system_error(GetLastError(), system_category(), "GetExtendedUdpTable sizing");
 
-        std::vector<BYTE> buffer(bufLen);
+        vector<BYTE> buffer(bufLen);
         auto udpTable = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(buffer.data());
 
         if (auto err = GetExtendedUdpTable(udpTable, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0); err != NO_ERROR)
-            throw std::system_error(err, std::system_category(), "GetExtendedUdpTable");
+            throw system_error(err, system_category(), "GetExtendedUdpTable");
 
         for (DWORD i = 0; i < udpTable->dwNumEntries; ++i) {
             const auto& row = udpTable->table[i];
@@ -130,8 +132,8 @@ void register_existing_connections() {
             flow_key.dst_port = 0;
             flow_key.proto = IPPROTO_UDP;
             {
-                std::lock_guard<std::mutex> lock(map_mutex);
-                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, std::chrono::steady_clock::now()};
+                lock_guard<mutex> lock(map_mutex);
+                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
             }
         }
     }
@@ -169,8 +171,8 @@ void flow_layer_listener() {
                 flow_key.dst_port = (USHORT)addr.Flow.RemotePort;
                 flow_key.proto = (uint8_t)addr.Flow.Protocol;
                 {
-                    std::lock_guard<std::mutex> lk(map_mutex);
-                    flow_to_pid[flow_key] = {addr.Flow.ProcessId, std::chrono::steady_clock::now()};
+                    lock_guard<mutex> lk(map_mutex);
+                    flow_to_pid[flow_key] = {addr.Flow.ProcessId, chrono::steady_clock::now()};
                 }
                 break;
             case WINDIVERT_EVENT_FLOW_DELETED:
@@ -180,7 +182,7 @@ void flow_layer_listener() {
                 flow_key.dst_port = (USHORT)addr.Flow.RemotePort;
                 flow_key.proto = (uint8_t)addr.Flow.Protocol;
                 {
-                    std::lock_guard<std::mutex> lk(map_mutex);
+                    lock_guard<mutex> lk(map_mutex);
                     auto it = flow_to_pid.find(flow_key);
                     if (it != flow_to_pid.end()) {
                         flow_to_pid.erase(flow_key);
@@ -270,12 +272,12 @@ void network_layer_listener() {
         DWORD pid = -1;
         PacketDirection direction = PacketDirection::UNKNOWN;
         {
-            std::lock_guard<std::mutex> lk(map_mutex);
+            lock_guard<mutex> lk(map_mutex);
             auto it = flow_to_pid.find(flow_key);
             if (it != flow_to_pid.end()) {
                 pid = it->second.pid;
                 direction = PacketDirection::UPLOAD;  // packet from local process
-                flow_to_pid[flow_key].last_seen = std::chrono::steady_clock::now();
+                flow_to_pid[flow_key].last_seen = chrono::steady_clock::now();
             } else {
                 FlowKey reverse_key = flow_key;
                 reverse_key.src_addr = flow_key.dst_addr;
@@ -287,7 +289,7 @@ void network_layer_listener() {
                 if (reverse_it != flow_to_pid.end()) {
                     pid = reverse_it->second.pid;
                     direction = PacketDirection::DOWNLOAD;  // packet to local process
-                    flow_to_pid[reverse_key].last_seen = std::chrono::steady_clock::now();
+                    flow_to_pid[reverse_key].last_seen = chrono::steady_clock::now();
                 }
             }
         }

@@ -4,30 +4,32 @@
 #include <thread>
 #include <cstdio>
 
+using namespace std;
+
 
 // MARK: RateLimiter
 RateLimiter::RateLimiter(uint64_t rate, uint64_t burst)
     : bytes_per_second(rate)
     , burst_size(burst)
     , tokens(burst)
-    , last_update(std::chrono::steady_clock::now()) {
+    , last_update(chrono::steady_clock::now()) {
 }
 
 // MARK: refill
 void RateLimiter::refill() {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_update);
+    auto now = chrono::steady_clock::now();
+    auto elapsed = chrono::duration_cast<chrono::microseconds>(now - last_update);
 
     // add tokens based on elapsed time
     double new_tokens = (elapsed.count() / 1000000.0) * bytes_per_second;
-    tokens = std::min(tokens + new_tokens, (double)burst_size);
+    tokens = min(tokens + new_tokens, (double)burst_size);
 
     last_update = now;
 }
 
 // MARK: try_consume
 bool RateLimiter::try_consume(uint64_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex);
+    lock_guard<mutex> lock(rate_limiter_mutex);
 
     refill();
 
@@ -40,20 +42,20 @@ bool RateLimiter::try_consume(uint64_t bytes) {
 }
 
 // MARK: time_until_available
-std::chrono::milliseconds RateLimiter::time_until_available(uint64_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex);
+chrono::milliseconds RateLimiter::time_until_available(uint64_t bytes) {
+    lock_guard<mutex> lock(rate_limiter_mutex);
 
     refill();
 
     if (tokens >= bytes) {
-        return std::chrono::milliseconds(0);
+        return chrono::milliseconds(0);
     }
 
     // calculate how long until we have enough tokens
     double needed = bytes - tokens;
     double seconds = needed / bytes_per_second;
 
-    return std::chrono::milliseconds(static_cast<int64_t>(seconds * 1000));
+    return chrono::milliseconds(static_cast<int64_t>(seconds * 1000));
 }
 
 
@@ -70,13 +72,13 @@ ThrottleManager::ThrottleManager(HANDLE handle)
 }
 
 // MARK: get_limiter_key
-std::string ThrottleManager::get_limiter_key(DWORD pid, const ThrottleConfig& config) {
-    return std::to_string(pid) + "_" + std::string(1, config.mode);
+string ThrottleManager::get_limiter_key(DWORD pid, const ThrottleConfig& config) {
+    return to_string(pid) + "_" + string(1, config.mode);
 }
 
 // MARK: add_throttle
 void ThrottleManager::add_throttle(const ThrottleConfig& config) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     if (config.executable == "global") {
         global_mode = true;
@@ -111,41 +113,41 @@ void ThrottleManager::add_throttle(const ThrottleConfig& config) {
         }
 
         // create appropriate limiter based on mode
-        std::string limiter_key = get_limiter_key(config.pid, config);
+        string limiter_key = get_limiter_key(config.pid, config);
 
         if (config.mode == 's') {
             limiters.erase(config.pid);
             limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(config.pid),
-                std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(config.pid),
+                forward_as_tuple(config.bytes_per_second, config.burst_size)
             );
         } else if (config.mode == 'i') {
             upload_limiters.erase(config.pid);
             download_limiters.erase(config.pid);
             upload_limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(config.pid),
-                std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(config.pid),
+                forward_as_tuple(config.bytes_per_second, config.burst_size)
             );
             download_limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(config.pid),
-                std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(config.pid),
+                forward_as_tuple(config.bytes_per_second, config.burst_size)
             );
         } else if (config.mode == 'u') {
             upload_limiters.erase(config.pid);
             upload_limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(config.pid),
-                std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(config.pid),
+                forward_as_tuple(config.bytes_per_second, config.burst_size)
             );
         } else if (config.mode == 'd') {
             download_limiters.erase(config.pid);
             download_limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(config.pid),
-                std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(config.pid),
+                forward_as_tuple(config.bytes_per_second, config.burst_size)
             );
         }
     }
@@ -170,7 +172,7 @@ void ThrottleManager::add_throttle(const ThrottleConfig& config) {
 
         // apply to all matching PIDs
         for (auto& [pid, config_list] : configs) {
-            std::string exe_name = pid_to_executable(pid);
+            string exe_name = pid_to_executable(pid);
             if (exe_name == config.executable) {
                 // add/update config for this PID
                 bool pid_found = false;
@@ -190,36 +192,36 @@ void ThrottleManager::add_throttle(const ThrottleConfig& config) {
                 if (config.mode == 's') {
                     limiters.erase(pid);
                     limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(config.bytes_per_second, config.burst_size)
                     );
                 } else if (config.mode == 'i') {
                     upload_limiters.erase(pid);
                     download_limiters.erase(pid);
                     upload_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(config.bytes_per_second, config.burst_size)
                     );
                     download_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(config.bytes_per_second, config.burst_size)
                     );
                 } else if (config.mode == 'u') {
                     upload_limiters.erase(pid);
                     upload_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(config.bytes_per_second, config.burst_size)
                     );
                 } else if (config.mode == 'd') {
                     download_limiters.erase(pid);
                     download_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(config.bytes_per_second, config.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(config.bytes_per_second, config.burst_size)
                     );
                 }
             }
@@ -229,7 +231,7 @@ void ThrottleManager::add_throttle(const ThrottleConfig& config) {
 
 // MARK: remove_throttle
 void ThrottleManager::remove_throttle(DWORD pid) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     limiters.erase(pid);
     upload_limiters.erase(pid);
@@ -237,8 +239,8 @@ void ThrottleManager::remove_throttle(DWORD pid) {
     configs.erase(pid);
 }
 
-void ThrottleManager::remove_throttle(const std::string& executable) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+void ThrottleManager::remove_throttle(const string& executable) {
+    lock_guard<mutex> lock(config_mutex);
 
     exe_configs.erase(executable);
 
@@ -249,7 +251,7 @@ void ThrottleManager::remove_throttle(const std::string& executable) {
 
         // remove configs that match this executable
         config_list.erase(
-            std::remove_if(config_list.begin(), config_list.end(),
+            remove_if(config_list.begin(), config_list.end(),
                 [&executable](const ThrottleConfig& cfg) {
                     return cfg.executable == executable;
                 }),
@@ -268,18 +270,18 @@ void ThrottleManager::remove_throttle(const std::string& executable) {
     }
 }
 
-void ThrottleManager::remove_throttle(DWORD pid, const std::string& executable) {
+void ThrottleManager::remove_throttle(DWORD pid, const string& executable) {
     remove_throttle(pid);
     remove_throttle(executable);
 }
 
 // MARK: should_queue_packet
 bool ThrottleManager::should_queue_packet(DWORD pid, uint32_t packet_size, PacketDirection direction) {
-    std::lock_guard<std::mutex> lock(config_mutex);
+    lock_guard<mutex> lock(config_mutex);
 
     // check for PID specific configs
     auto config_it = configs.find(pid);
-    std::vector<ThrottleConfig>* active_configs = nullptr;
+    vector<ThrottleConfig>* active_configs = nullptr;
     bool has_specific_config = false;  // track if we found a specific config
 
     if (config_it != configs.end()) {
@@ -287,9 +289,9 @@ bool ThrottleManager::should_queue_packet(DWORD pid, uint32_t packet_size, Packe
         has_specific_config = true;
     } else {
         // check for executable specific configs
-        std::string exe_name = pid_to_executable(pid);
+        string exe_name = pid_to_executable(pid);
         for (const auto& ex : g_config.exclude_targets) {
-            if (ex == std::to_string(pid) || ex == exe_name) {
+            if (ex == to_string(pid) || ex == exe_name) {
                 return false;
             }
         }
@@ -305,32 +307,32 @@ bool ThrottleManager::should_queue_packet(DWORD pid, uint32_t packet_size, Packe
             for (const auto& cfg : *active_configs) {
                 if (cfg.mode == 's') {
                     limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
                     );
                 } else if (cfg.mode == 'i') {
                     upload_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
                     );
                     download_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
                     );
                 } else if (cfg.mode == 'u') {
                     upload_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
                     );
                 } else if (cfg.mode == 'd') {
                     download_limiters.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(pid),
-                        std::forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
+                        piecewise_construct,
+                        forward_as_tuple(pid),
+                        forward_as_tuple(cfg.bytes_per_second, cfg.burst_size)
                     );
                 }
             }
@@ -346,9 +348,9 @@ bool ThrottleManager::should_queue_packet(DWORD pid, uint32_t packet_size, Packe
             has_specific_config = true;
 
             limiters.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(pid),
-                std::forward_as_tuple(default_config.bytes_per_second, default_config.burst_size)
+                piecewise_construct,
+                forward_as_tuple(pid),
+                forward_as_tuple(default_config.bytes_per_second, default_config.burst_size)
             );
         }
     }
@@ -430,12 +432,12 @@ void ThrottleManager::queue_packet(
     QueuedPacket queued;
     queued.data.assign(packet, packet + packet_len);
     queued.addr = addr;
-    queued.enqueue_time = std::chrono::steady_clock::now();
+    queued.enqueue_time = chrono::steady_clock::now();
     queued.pid = pid;
     queued.direction = direction;
 
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    packet_queue.push(std::move(queued));
+    lock_guard<mutex> lock(queue_mutex);
+    packet_queue.push(move(queued));
 }
 
 // MARK: process_queue
@@ -446,9 +448,9 @@ void ThrottleManager::process_queue() {
 
         // try to get a packet from the queue
         {
-            std::lock_guard<std::mutex> lock(queue_mutex);
+            lock_guard<mutex> lock(queue_mutex);
             if (!packet_queue.empty()) {
-                packet = std::move(packet_queue.front());
+                packet = move(packet_queue.front());
                 packet_queue.pop();
                 has_packet = true;
             }
@@ -456,16 +458,16 @@ void ThrottleManager::process_queue() {
 
         if (!has_packet) {
             // no packets to process, sleep briefly
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            this_thread::sleep_for(chrono::milliseconds(1));
             continue;
         }
 
         // check if we can send this packet
         bool can_send = false;
-        std::chrono::milliseconds wait_time(0);
+        chrono::milliseconds wait_time(0);
 
         {
-            std::lock_guard<std::mutex> lock(config_mutex);
+            lock_guard<mutex> lock(config_mutex);
             auto config_it = configs.find(packet.pid);
 
             if (config_it == configs.end()) {
@@ -474,7 +476,7 @@ void ThrottleManager::process_queue() {
             } else {
                 // check all applicable configs
                 can_send = true;  // assume we can send unless a limiter blocks it
-                std::chrono::milliseconds max_wait(0);
+                chrono::milliseconds max_wait(0);
 
                 for (const auto& config : config_it->second) {
                     // skip configs that dont apply to this direction
@@ -483,7 +485,7 @@ void ThrottleManager::process_queue() {
 
                     // try to consume tokens based on mode
                     bool this_can_send = false;
-                    std::chrono::milliseconds this_wait(0);
+                    chrono::milliseconds this_wait(0);
 
                     switch (config.mode) {
                         case 'u': // upload only
@@ -550,7 +552,7 @@ void ThrottleManager::process_queue() {
 
                     if (!this_can_send) {
                         can_send = false;
-                        max_wait = std::max(max_wait, this_wait);
+                        max_wait = max(max_wait, this_wait);
                     }
                 }
 
@@ -566,13 +568,13 @@ void ThrottleManager::process_queue() {
         } else {
             // put packet back in queue and wait
             {
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                packet_queue.push(std::move(packet));
+                lock_guard<mutex> lock(queue_mutex);
+                packet_queue.push(move(packet));
             }
 
             // sleep for a portion of the wait time
-            auto sleep_time = std::min(wait_time, std::chrono::milliseconds(1));
-            std::this_thread::sleep_for(sleep_time);
+            auto sleep_time = min(wait_time, chrono::milliseconds(1));
+            this_thread::sleep_for(sleep_time);
         }
     }
 }

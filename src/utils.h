@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windivert.h>
+#include <algorithm>
 #include <windows.h>
 #include <string>
 

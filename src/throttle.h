@@ -43,7 +43,7 @@ private:
     uint64_t burst_size;
     double tokens;  // current token count in bytes
     std::chrono::steady_clock::time_point last_update;
-    std::mutex mutex;
+    std::mutex rate_limiter_mutex;
 
 public:
     RateLimiter(uint64_t rate, uint64_t burst);
