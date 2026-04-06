@@ -6,12 +6,14 @@
 // windivert.h (v2.2.2-A) does not include this for some reason...
 #define IPPROTO_ICMPV6 58
 
+#include <condition_variable>
 #include <unordered_map>
 #include <windows.h>
 #include <cstdint>
 #include <psapi.h>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 #include <vector>
 #include <mutex>
 
@@ -24,3 +26,4 @@
 
 void flow_layer_listener();
 void network_layer_listener();
+bool wait_for_listener_startup(std::chrono::milliseconds timeout);

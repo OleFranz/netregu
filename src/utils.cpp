@@ -6,35 +6,35 @@
 using namespace std;
 
 
-const char* pid_to_executable(const DWORD pid) {
-    static char executable[MAX_PATH] = "unknown";
-
+string pid_to_executable(const DWORD pid) {
     if (pid == 4) {
-        strcpy_s(executable, MAX_PATH, "system");
-    } else if (pid != -1) {
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (process) {
-            char name[MAX_PATH];
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageName(process, 0, name, &size)) {
-                const char* filename = strrchr(name, '\\');
-                if (filename) {
-                    strcpy_s(executable, MAX_PATH, filename + 1);
-                } else {
-                    strcpy_s(executable, MAX_PATH, name);
-                }
-            } else {
-                strcpy_s(executable, MAX_PATH, "unknown");
-            }
-            CloseHandle(process);
-        } else {
-            strcpy_s(executable, MAX_PATH, "unknown");
-        }
-    } else {
-        strcpy_s(executable, MAX_PATH, "unknown");
+        return "system";
     }
 
-    transform(executable, executable + strlen(executable), executable, ::tolower);
+    if (pid == static_cast<DWORD>(-1)) {
+        return "unknown";
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return "unknown";
+    }
+
+    char name[MAX_PATH];
+    DWORD size = MAX_PATH;
+    string executable = "unknown";
+
+    if (QueryFullProcessImageName(process, 0, name, &size)) {
+        const char* filename = strrchr(name, '\\');
+        executable = filename ? filename + 1 : name;
+    }
+
+    CloseHandle(process);
+
+    transform(executable.begin(), executable.end(), executable.begin(),
+        [](unsigned char c) {
+            return static_cast<char>(tolower(c));
+        });
 
     return executable;
 }

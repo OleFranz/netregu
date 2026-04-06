@@ -61,81 +61,162 @@ struct FragmentKeyHash {
 
 static unordered_map<FlowKey, FlowInfo, FlowKeyHash> flow_to_pid;
 static mutex map_mutex;
+static mutex startup_mutex;
+static condition_variable startup_cv;
+static bool flow_startup_done = false;
+static bool network_startup_done = false;
+static bool flow_startup_ok = false;
+static bool network_startup_ok = false;
 
 
-void register_existing_connections() {
+static void set_flow_startup_state(bool ok) {
     {
-        DWORD bufLen = 0;
-        if (GetExtendedTcpTable(nullptr, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER)
-            throw system_error(GetLastError(), system_category(), "GetExtendedTcpTable sizing");
+        lock_guard<mutex> lock(startup_mutex);
+        flow_startup_done = true;
+        flow_startup_ok = ok;
+    }
+    startup_cv.notify_all();
+}
 
-        vector<BYTE> buffer(bufLen);
-        auto tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
 
-        if (auto err = GetExtendedTcpTable(tcpTable, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0); err != NO_ERROR)
-            throw system_error(err, system_category(), "GetExtendedTcpTable");
+static void set_network_startup_state(bool ok) {
+    {
+        lock_guard<mutex> lock(startup_mutex);
+        network_startup_done = true;
+        network_startup_ok = ok;
+    }
+    startup_cv.notify_all();
+}
 
-        for (DWORD i = 0; i < tcpTable->dwNumEntries; ++i) {
-            const auto& row = tcpTable->table[i];
-            if (g_config.verbose) {
-                printf("tcp connection: %-3i: [%-15s:%-5u - %-15s:%-5u] %-30s (%-5d)\n",
-                    i,
-                    ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwLocalAddr)),
-                    WinDivertHelperNtohs(USHORT(row.dwLocalPort)),
-                    ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwRemoteAddr)),
-                    WinDivertHelperNtohs(USHORT(row.dwRemotePort)),
-                    pid_to_executable(row.dwOwningPid),
-                    row.dwOwningPid
-                );
-            }
-            FlowKey flow_key;
-            flow_key.src_addr = WinDivertHelperNtohl((UINT32)row.dwLocalAddr);
-            flow_key.src_port = WinDivertHelperNtohs(USHORT(row.dwLocalPort));
-            flow_key.dst_addr = WinDivertHelperNtohl((UINT32)row.dwRemoteAddr);
-            flow_key.dst_port = WinDivertHelperNtohs(USHORT(row.dwRemotePort));
-            flow_key.proto = IPPROTO_TCP;
-            {
-                lock_guard<mutex> lk(map_mutex);
-                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
-            }
+
+bool wait_for_listener_startup(const chrono::milliseconds timeout) {
+    unique_lock<mutex> lock(startup_mutex);
+    const bool completed = startup_cv.wait_for(lock, timeout, [] {
+        return flow_startup_done && network_startup_done;
+    });
+
+    return completed && flow_startup_ok && network_startup_ok;
+}
+
+
+static HANDLE open_windivert_with_retry(
+    const char* filter,
+    const WINDIVERT_LAYER layer,
+    const INT16 priority,
+    const UINT64 flags
+) {
+    constexpr int max_attempts = 10;
+    constexpr auto retry_delay = chrono::milliseconds(250);
+
+    DWORD last_error = ERROR_SUCCESS;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        HANDLE handle = WinDivertOpen(filter, layer, priority, flags);
+        if (handle != INVALID_HANDLE_VALUE) {
+            return handle;
+        }
+
+        last_error = GetLastError();
+        if (attempt < max_attempts - 1) {
+            this_thread::sleep_for(retry_delay);
         }
     }
 
-    {
-        DWORD bufLen = 0;
-        if (GetExtendedUdpTable(nullptr, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER)
-            throw system_error(GetLastError(), system_category(), "GetExtendedUdpTable sizing");
+    SetLastError(last_error);
+    return INVALID_HANDLE_VALUE;
+}
 
-        vector<BYTE> buffer(bufLen);
-        auto udpTable = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(buffer.data());
 
-        if (auto err = GetExtendedUdpTable(udpTable, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0); err != NO_ERROR)
-            throw system_error(err, system_category(), "GetExtendedUdpTable");
+static uint32_t flow_addr_to_key(const UINT32 addr[4]) {
+    return WinDivertHelperNtohl(addr[3]);
+}
 
-        for (DWORD i = 0; i < udpTable->dwNumEntries; ++i) {
-            const auto& row = udpTable->table[i];
-            if (g_config.verbose) {
-                printf("udp connection: %-3i: [%-15s:%-5u - %-15s:%-5u] %-30s (%-5d)\n",
-                    i,
-                    ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwLocalAddr)),
-                    WinDivertHelperNtohs(USHORT(row.dwLocalPort)),
-                    ipv4_to_string(WinDivertHelperHtonl((UINT32)0)),
-                    WinDivertHelperNtohs(USHORT(0)),
-                    pid_to_executable(row.dwOwningPid),
-                    row.dwOwningPid
-                );
-            }
-            FlowKey flow_key;
-            flow_key.src_addr = WinDivertHelperNtohl((UINT32)row.dwLocalAddr);
-            flow_key.src_port = WinDivertHelperNtohs(USHORT(row.dwLocalPort));
-            flow_key.dst_addr = 0;
-            flow_key.dst_port = 0;
-            flow_key.proto = IPPROTO_UDP;
-            {
-                lock_guard<mutex> lock(map_mutex);
-                flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
+
+bool register_existing_connections() {
+    try {
+        {
+            DWORD bufLen = 0;
+            DWORD err = GetExtendedTcpTable(nullptr, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+            if (err != ERROR_INSUFFICIENT_BUFFER && err != NO_ERROR)
+                throw system_error(err, system_category(), "GetExtendedTcpTable sizing");
+
+            vector<BYTE> buffer(bufLen);
+            auto tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
+
+            if (bufLen > 0) {
+                if (auto table_err = GetExtendedTcpTable(tcpTable, &bufLen, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0); table_err != NO_ERROR)
+                    throw system_error(table_err, system_category(), "GetExtendedTcpTable");
+
+                for (DWORD i = 0; i < tcpTable->dwNumEntries; ++i) {
+                    const auto& row = tcpTable->table[i];
+                    if (g_config.verbose) {
+                        printf("tcp connection: %-3i: [%-15s:%-5u - %-15s:%-5u] %-30s (%-5d)\n",
+                            i,
+                            ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwLocalAddr)),
+                            WinDivertHelperNtohs(USHORT(row.dwLocalPort)),
+                            ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwRemoteAddr)),
+                            WinDivertHelperNtohs(USHORT(row.dwRemotePort)),
+                            pid_to_executable(row.dwOwningPid).c_str(),
+                            row.dwOwningPid
+                        );
+                    }
+                    FlowKey flow_key;
+                    flow_key.src_addr = WinDivertHelperNtohl((UINT32)row.dwLocalAddr);
+                    flow_key.src_port = WinDivertHelperNtohs(USHORT(row.dwLocalPort));
+                    flow_key.dst_addr = WinDivertHelperNtohl((UINT32)row.dwRemoteAddr);
+                    flow_key.dst_port = WinDivertHelperNtohs(USHORT(row.dwRemotePort));
+                    flow_key.proto = IPPROTO_TCP;
+                    {
+                        lock_guard<mutex> lk(map_mutex);
+                        flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
+                    }
+                }
             }
         }
+
+        {
+            DWORD bufLen = 0;
+            DWORD err = GetExtendedUdpTable(nullptr, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+            if (err != ERROR_INSUFFICIENT_BUFFER && err != NO_ERROR)
+                throw system_error(err, system_category(), "GetExtendedUdpTable sizing");
+
+            vector<BYTE> buffer(bufLen);
+            auto udpTable = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(buffer.data());
+
+            if (bufLen > 0) {
+                if (auto table_err = GetExtendedUdpTable(udpTable, &bufLen, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0); table_err != NO_ERROR)
+                    throw system_error(table_err, system_category(), "GetExtendedUdpTable");
+
+                for (DWORD i = 0; i < udpTable->dwNumEntries; ++i) {
+                    const auto& row = udpTable->table[i];
+                    if (g_config.verbose) {
+                        printf("udp connection: %-3i: [%-15s:%-5u - %-15s:%-5u] %-30s (%-5d)\n",
+                            i,
+                            ipv4_to_string(WinDivertHelperHtonl((UINT32)row.dwLocalAddr)),
+                            WinDivertHelperNtohs(USHORT(row.dwLocalPort)),
+                            ipv4_to_string(WinDivertHelperHtonl((UINT32)0)),
+                            WinDivertHelperNtohs(USHORT(0)),
+                            pid_to_executable(row.dwOwningPid).c_str(),
+                            row.dwOwningPid
+                        );
+                    }
+                    FlowKey flow_key;
+                    flow_key.src_addr = WinDivertHelperNtohl((UINT32)row.dwLocalAddr);
+                    flow_key.src_port = WinDivertHelperNtohs(USHORT(row.dwLocalPort));
+                    flow_key.dst_addr = 0;
+                    flow_key.dst_port = 0;
+                    flow_key.proto = IPPROTO_UDP;
+                    {
+                        lock_guard<mutex> lock(map_mutex);
+                        flow_to_pid[flow_key] = {(UINT32)row.dwOwningPid, chrono::steady_clock::now()};
+                    }
+                }
+            }
+        }
+
+        return true;
+    } catch (const exception& e) {
+        fprintf(stderr, "register_existing_connections failed: %s\n", e.what());
+        return false;
     }
 }
 
@@ -143,7 +224,7 @@ void register_existing_connections() {
 void flow_layer_listener() {
     WINDIVERT_ADDRESS addr;
 
-    HANDLE flow_handle = WinDivertOpen(
+    HANDLE flow_handle = open_windivert_with_retry(
         "true", // capture all
         WINDIVERT_LAYER_FLOW,
         0,
@@ -151,10 +232,17 @@ void flow_layer_listener() {
     );
     if (flow_handle == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "WinDivertOpen(flow) failed: %s\n", open_error_to_string(GetLastError()).c_str());
+        set_flow_startup_state(false);
         return;
     }
 
-    register_existing_connections();
+    if (!register_existing_connections()) {
+        set_flow_startup_state(false);
+        WinDivertClose(flow_handle);
+        return;
+    }
+
+    set_flow_startup_state(true);
 
     while (true) {
         if (!WinDivertRecv(flow_handle, nullptr, 0, nullptr, &addr)) {
@@ -165,9 +253,9 @@ void flow_layer_listener() {
         FlowKey flow_key;
         switch (addr.Event) {
             case WINDIVERT_EVENT_FLOW_ESTABLISHED:
-                flow_key.src_addr = addr.Flow.LocalAddr[0];
+                flow_key.src_addr = flow_addr_to_key(addr.Flow.LocalAddr);
                 flow_key.src_port = (USHORT)addr.Flow.LocalPort;
-                flow_key.dst_addr = addr.Flow.RemoteAddr[0];
+                flow_key.dst_addr = flow_addr_to_key(addr.Flow.RemoteAddr);
                 flow_key.dst_port = (USHORT)addr.Flow.RemotePort;
                 flow_key.proto = (uint8_t)addr.Flow.Protocol;
                 {
@@ -176,9 +264,9 @@ void flow_layer_listener() {
                 }
                 break;
             case WINDIVERT_EVENT_FLOW_DELETED:
-                flow_key.src_addr = addr.Flow.LocalAddr[0];
+                flow_key.src_addr = flow_addr_to_key(addr.Flow.LocalAddr);
                 flow_key.src_port = (USHORT)addr.Flow.LocalPort;
-                flow_key.dst_addr = addr.Flow.RemoteAddr[0];
+                flow_key.dst_addr = flow_addr_to_key(addr.Flow.RemoteAddr);
                 flow_key.dst_port = (USHORT)addr.Flow.RemotePort;
                 flow_key.proto = (uint8_t)addr.Flow.Protocol;
                 {
@@ -201,7 +289,7 @@ void network_layer_listener() {
     UINT packet_len;
     WINDIVERT_ADDRESS addr;
 
-    HANDLE network_handle = WinDivertOpen(
+    HANDLE network_handle = open_windivert_with_retry(
         "ip or ipv6",
         WINDIVERT_LAYER_NETWORK,
         0,
@@ -209,6 +297,7 @@ void network_layer_listener() {
     );
     if (network_handle == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "WinDivertOpen(network) failed: %s\n", open_error_to_string(GetLastError()).c_str());
+        set_network_startup_state(false);
         return;
     }
 
@@ -216,6 +305,7 @@ void network_layer_listener() {
     // initialize throttle and block system
     init_throttle_system(network_handle);
     init_block_system(network_handle);
+    set_network_startup_state(true);
 
 
     while (true) {
@@ -323,7 +413,7 @@ void network_layer_listener() {
                         ip_ver,
                         proto_str,
                         direction == PacketDirection::UPLOAD ? "UP" : direction == PacketDirection::DOWNLOAD ? "DN" : "??",
-                        executable,
+                        executable.c_str(),
                         pid,
                         packet_len
                     );
@@ -352,7 +442,7 @@ void network_layer_listener() {
                     ip_ver,
                     proto_str,
                     direction == PacketDirection::UPLOAD ? "UP" : direction == PacketDirection::DOWNLOAD ? "DN" : "??",
-                    executable,
+                    executable.c_str(),
                     pid,
                     packet_len
                 );
@@ -370,7 +460,7 @@ void network_layer_listener() {
                     ip_ver,
                     proto_str,
                     direction == PacketDirection::UPLOAD ? "UP" : direction == PacketDirection::DOWNLOAD ? "DN" : "??",
-                    executable,
+                    executable.c_str(),
                     pid,
                     packet_len
                 );

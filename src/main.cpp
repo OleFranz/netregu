@@ -1,4 +1,5 @@
 #include <CLI11.hpp>
+#include <chrono>
 #include <iostream>
 #include <thread>
 #include <print>
@@ -146,9 +147,14 @@ int main(int argc, char** argv) {
 
     thread flow_thread(flow_layer_listener);
     thread network_thread(network_layer_listener);
-    thread queue_thread(packet_queue_processor);
+    if (!wait_for_listener_startup(chrono::seconds(20))) {
+        cerr << "Error: listener startup failed or timed out." << '\n';
+        flow_thread.detach();
+        network_thread.detach();
+        return 1;
+    }
 
-    this_thread::sleep_for(chrono::milliseconds(500));
+    thread queue_thread(packet_queue_processor);
 
 
     for (auto& rule : options.exclude_rules) {
